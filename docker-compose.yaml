@@ -1,6 +1,6 @@
 services:
   cache:
-    image: quay.io/vpavlin0/codex-qaku-cache:8ea7e43-e3b0c4
+    image: quay.io/vpavlin0/codex-qaku-cache:e7e6630-e3b0c4
     restart: always
     environment:
       - QAKU_CACHE_MAX_SIZE=10485760
