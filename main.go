@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -66,10 +68,16 @@ var (
 		Name: "qaku_cache_failures",
 		Help: "The total number failed attempts to cache a snapshot",
 	})
+	snapSizes = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "qaku_cache_sizes",
+		Help:    "Histogram of sizes of cached snapshots",
+		Buckets: []float64{100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0},
+	})
 )
 
 func main() {
 	go prom()
+	go server()
 
 	//log.Panicln(os.Getenv(envMaxDatasetSize))
 	maxSizeFromEnv, err := strconv.Atoi(os.Getenv(envMaxDatasetSize))
@@ -145,9 +153,87 @@ func main() {
 	}
 }
 
+func server() {
+	r := gin.Default()
+
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:  []string{"http://localhost:3000", "https://qaku.app"},
+		AllowMethods:  []string{"GET", "OPTIONS"},
+		AllowHeaders:  []string{"Origin,DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range"},
+		ExposeHeaders: []string{"Content-Length"},
+	}))
+
+	r.GET("/api/qaku/v1/info", func(c *gin.Context) {
+		url := getCodexUrl()
+
+		type DebugInfo struct {
+			ID             string   `json:"id"`
+			AnnouncedAddrs []string `json:"announceAddresses"`
+		}
+
+		var infoResp *http.Response
+		infoResp, err := http.Get(fmt.Sprintf("%s/api/codex/v1/debug/info", url))
+		if err != nil {
+			log.Println("failed to fetch manifest", err)
+			return
+		}
+		defer infoResp.Body.Close()
+
+		body, err := io.ReadAll(infoResp.Body)
+		if err != nil {
+			log.Println("faild to read manifest data", err)
+			return
+		}
+
+		info := &DebugInfo{}
+		err = json.Unmarshal(body, info)
+		if err != nil {
+			log.Println("failed to unmarshal manifest: ", err)
+			return
+		}
+
+		c.JSON(200, gin.H{"peerId": info.ID, "addr": info.AnnouncedAddrs[0]})
+	})
+
+	r.GET("/api/qaku/v1/snapshot/:cid", func(c *gin.Context) {
+		url := getCodexUrl()
+		cid := c.Param("cid")
+		log.Println(c.Params)
+
+		if cid == "" {
+			c.Error(fmt.Errorf("empty CID param"))
+			c.String(500, "empty CID param")
+			return
+		}
+
+		var cidResp *http.Response
+		cidResp, err := http.Get(fmt.Sprintf("%s/api/codex/v1/data/%s", url, cid))
+		if err != nil {
+			c.Error(fmt.Errorf("failed to fetch manifest: %s", err))
+			return
+		}
+		defer cidResp.Body.Close()
+
+		io.Copy(c.Writer, cidResp.Body)
+		c.Status(cidResp.StatusCode)
+
+	})
+
+	log.Fatal(r.Run("0.0.0.0:8080"))
+}
+
 func prom() {
 	http.Handle("/metrics", promhttp.Handler())
 	http.ListenAndServe(":8003", nil)
+}
+
+func getCodexUrl() string {
+	url := os.Getenv(envCodexApiUrl)
+	if url == "" {
+		url = "http://codex:8080"
+	}
+
+	return url
 }
 
 func cache(envelope *protocol.Envelope) {
@@ -165,10 +251,7 @@ func cache(envelope *protocol.Envelope) {
 		return
 	}
 
-	url := os.Getenv(envCodexApiUrl)
-	if url == "" {
-		url = "http://codex:8080"
-	}
+	url := getCodexUrl()
 
 	var manifestResp *http.Response
 	manifestResp, err = http.Get(fmt.Sprintf("%s/api/codex/v1/data/%s/network/manifest", url, cr.Payload.CID))
@@ -179,17 +262,16 @@ func cache(envelope *protocol.Envelope) {
 	defer manifestResp.Body.Close()
 
 	if manifestResp.StatusCode != 200 {
+		err = fmt.Errorf("failed to fetch manifest")
 		log.Println("failed to fetch manifest", manifestResp.Status)
 		return
 	}
 
-	body, err := ioutil.ReadAll(manifestResp.Body)
+	body, err := io.ReadAll(manifestResp.Body)
 	if err != nil {
 		log.Println("faild to read manifest data", err)
 		return
 	}
-
-	log.Println(string(body))
 
 	cdc := &CodexDataContent{}
 	err = json.Unmarshal(body, cdc)
@@ -203,6 +285,8 @@ func cache(envelope *protocol.Envelope) {
 		return
 	}
 
+	snapSizes.Observe(float64(cdc.Manifest.DatasetSize) / 1024)
+
 	var resp *http.Response
 	resp, err = http.Post(fmt.Sprintf("%s/api/codex/v1/data/%s/network", url, cr.Payload.CID), "", nil)
 	if err != nil {
@@ -211,6 +295,7 @@ func cache(envelope *protocol.Envelope) {
 	}
 
 	if resp.StatusCode != 200 {
+		err = fmt.Errorf("request to Codex failed")
 		log.Println("request to Codex failed: ", resp.Status)
 		return
 	}

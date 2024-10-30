@@ -1,16 +1,11 @@
 services:
   cache:
-    image: quay.io/vpavlin0/codex-qaku-cache:e7e6630-e3b0c4
+    image: quay.io/vpavlin0/codex-qaku-cache:${TAG:-dev}
     restart: always
     environment:
       - QAKU_CACHE_MAX_SIZE=10485760
-  nginx:
-    image: nginx
-    volumes:
-    - ./nginx.conf:/etc/nginx/conf.d/snapshot.conf
     ports:
-    - 0.0.0.0:8081:8080/tcp
-
+      - 8082:8080/tcp
   # Codex Node
   codex:
     image: codexstorage/nim-codex:0.1.7
