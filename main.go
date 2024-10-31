@@ -138,23 +138,23 @@ func main() {
 
 	time.Sleep(5 * time.Second)
 
-	contentTopic, err := protocol.NewContentTopic("qaku", "1", "persist", "json")
+	contentTopic, err := protocol.StringToContentTopic(contentTopic)
 	if err != nil {
 		log.Fatal(err)
 	}
-	pubsubTopic := protocol.GetShardFromContentTopic(contentTopic, 8)
 
-	cf := protocol.NewContentFilter(pubsubTopic.String(), contentTopic.String())
+	log.Println(contentTopic)
+	pubsubTopic := protocol.GetShardFromContentTopic(contentTopic, 8)
+	cf := protocol.NewContentFilter(pubsubTopic.String(), "/0"+contentTopic.String())
 
 	c := &Cache{}
 
 	logger, _ := zap.NewDevelopment()
 	fm := filter.NewFilterManager(ctx, logger, 2, c, node.FilterLightnode())
 	fm.SubscribeFilter(uuid.NewString(), cf)
-	time.Sleep(3 * time.Second)
 
 	log.Println("Starting main loop")
-	fm.SubscribeFilter(uuid.NewString(), cf)
+	fm.OnConnectionStatusChange("", true)
 
 	server()
 }
