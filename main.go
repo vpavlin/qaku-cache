@@ -15,11 +15,14 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/waku-org/go-waku/waku/v2/api/filter"
 	"github.com/waku-org/go-waku/waku/v2/node"
 	"github.com/waku-org/go-waku/waku/v2/protocol"
+	"go.uber.org/zap"
 )
 
 const (
@@ -77,7 +80,6 @@ var (
 
 func main() {
 	go prom()
-	go server()
 
 	//log.Panicln(os.Getenv(envMaxDatasetSize))
 	maxSizeFromEnv, err := strconv.Atoi(os.Getenv(envMaxDatasetSize))
@@ -136,21 +138,25 @@ func main() {
 
 	time.Sleep(5 * time.Second)
 
-	cf := protocol.ContentFilter{
-		ContentTopics: protocol.NewContentTopicSet(contentTopic),
-	}
-
-	subs, err := node.FilterLightnode().Subscribe(ctx, cf)
+	contentTopic, err := protocol.NewContentTopic("qaku", "1", "persist", "json")
 	if err != nil {
 		log.Fatal(err)
 	}
+	pubsubTopic := protocol.GetShardFromContentTopic(contentTopic, 8)
+
+	cf := protocol.NewContentFilter(pubsubTopic.String(), contentTopic.String())
+
+	c := &Cache{}
+
+	logger, _ := zap.NewDevelopment()
+	fm := filter.NewFilterManager(ctx, logger, 2, c, node.FilterLightnode())
+	fm.SubscribeFilter(uuid.NewString(), cf)
+	time.Sleep(3 * time.Second)
 
 	log.Println("Starting main loop")
+	fm.SubscribeFilter(uuid.NewString(), cf)
 
-	for envelope := range subs[0].C {
-		log.Println("Got a message!!!")
-		go cache(envelope)
-	}
+	server()
 }
 
 func server() {
@@ -236,7 +242,11 @@ func getCodexUrl() string {
 	return url
 }
 
-func cache(envelope *protocol.Envelope) {
+type Cache struct {
+}
+
+func (c *Cache) OnNewEnvelope(envelope *protocol.Envelope) error {
+	log.Println(envelope)
 	var err error
 	defer func() {
 		if err != nil {
@@ -248,7 +258,7 @@ func cache(envelope *protocol.Envelope) {
 	err = json.Unmarshal(envelope.Message().Payload, cr)
 	if err != nil {
 		log.Println("failed to unmarshal: ", err)
-		return
+		return err
 	}
 
 	url := getCodexUrl()
@@ -257,32 +267,32 @@ func cache(envelope *protocol.Envelope) {
 	manifestResp, err = http.Get(fmt.Sprintf("%s/api/codex/v1/data/%s/network/manifest", url, cr.Payload.CID))
 	if err != nil {
 		log.Println("failed to fetch manifest", err)
-		return
+		return err
 	}
 	defer manifestResp.Body.Close()
 
 	if manifestResp.StatusCode != 200 {
 		err = fmt.Errorf("failed to fetch manifest")
 		log.Println("failed to fetch manifest", manifestResp.Status)
-		return
+		return err
 	}
 
 	body, err := io.ReadAll(manifestResp.Body)
 	if err != nil {
 		log.Println("faild to read manifest data", err)
-		return
+		return err
 	}
 
 	cdc := &CodexDataContent{}
 	err = json.Unmarshal(body, cdc)
 	if err != nil {
 		log.Println("failed to unmarshal manifest: ", err)
-		return
+		return err
 	}
 
 	if cdc.Manifest.DatasetSize > maxDatasetSize {
 		log.Printf("dataset too big %d > %d", cdc.Manifest.DatasetSize, maxDatasetSize)
-		return
+		return err
 	}
 
 	snapSizes.Observe(float64(cdc.Manifest.DatasetSize) / 1024)
@@ -291,14 +301,16 @@ func cache(envelope *protocol.Envelope) {
 	resp, err = http.Post(fmt.Sprintf("%s/api/codex/v1/data/%s/network", url, cr.Payload.CID), "", nil)
 	if err != nil {
 		log.Println("failed to send request: ", err)
-		return
+		return err
 	}
 
 	if resp.StatusCode != 200 {
 		err = fmt.Errorf("request to Codex failed")
 		log.Println("request to Codex failed: ", resp.Status)
-		return
+		return err
 	}
 
 	snapSuccess.Inc()
+
+	return nil
 }
