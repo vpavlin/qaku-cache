@@ -1,28 +1,24 @@
 package main
 
 import (
-	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 
-	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/waku-org/go-waku/waku/v2/api/filter"
-	"github.com/waku-org/go-waku/waku/v2/node"
-	"github.com/waku-org/go-waku/waku/v2/protocol"
-	"go.uber.org/zap"
+	"github.com/waku-org/waku-go-bindings/waku"
+	"github.com/waku-org/waku-go-bindings/waku/common"
 )
 
 const (
@@ -91,70 +87,39 @@ func main() {
 		maxDatasetSize = maxSizeFromEnv
 	}
 
-	hostAddr, _ := net.ResolveTCPAddr("tcp", "0.0.0.0:0")
-
-	nodes := []string{
-		"enr:-QEkuEBIkb8q8_mrorHndoXH9t5N6ZfD-jehQCrYeoJDPHqT0l0wyaONa2-piRQsi3oVKAzDShDVeoQhy0uwN1xbZfPZAYJpZIJ2NIJpcIQiQlleim11bHRpYWRkcnO4bgA0Ni9ub2RlLTAxLmdjLXVzLWNlbnRyYWwxLWEud2FrdS5zYW5kYm94LnN0YXR1cy5pbQZ2XwA2Ni9ub2RlLTAxLmdjLXVzLWNlbnRyYWwxLWEud2FrdS5zYW5kYm94LnN0YXR1cy5pbQYfQN4DgnJzkwABCAAAAAEAAgADAAQABQAGAAeJc2VjcDI1NmsxoQKnGt-GSgqPSf3IAPM7bFgTlpczpMZZLF3geeoNNsxzSoN0Y3CCdl-DdWRwgiMohXdha3UyDw",
-		"enr:-QESuEB4Dchgjn7gfAvwB00CxTA-nGiyk-aALI-H4dYSZD3rUk7bZHmP8d2U6xDiQ2vZffpo45Jp7zKNdnwDUx6g4o6XAYJpZIJ2NIJpcIRA4VDAim11bHRpYWRkcnO4XAArNiZub2RlLTAxLmRvLWFtczMud2FrdS5zYW5kYm94LnN0YXR1cy5pbQZ2XwAtNiZub2RlLTAxLmRvLWFtczMud2FrdS5zYW5kYm94LnN0YXR1cy5pbQYfQN4DgnJzkwABCAAAAAEAAgADAAQABQAGAAeJc2VjcDI1NmsxoQOvD3S3jUNICsrOILlmhENiWAMmMVlAl6-Q8wRB7hidY4N0Y3CCdl-DdWRwgiMohXdha3UyDw",
-		"enr:-QEkuEBfEzJm_kigJ2HoSS_RBFJYhKHocGdkhhBr6jSUAWjLdFPp6Pj1l4yiTQp7TGHyu1kC6FyaU573VN8klLsEm-XuAYJpZIJ2NIJpcIQI2SVcim11bHRpYWRkcnO4bgA0Ni9ub2RlLTAxLmFjLWNuLWhvbmdrb25nLWMud2FrdS5zYW5kYm94LnN0YXR1cy5pbQZ2XwA2Ni9ub2RlLTAxLmFjLWNuLWhvbmdrb25nLWMud2FrdS5zYW5kYm94LnN0YXR1cy5pbQYfQN4DgnJzkwABCAAAAAEAAgADAAQABQAGAAeJc2VjcDI1NmsxoQOwsS69tgD7u1K50r5-qG5hweuTwa0W26aYPnvivpNlrYN0Y3CCdl-DdWRwgiMohXdha3UyDw",
-		"enr:-QEMuEDbayK340kH24XzK5FPIYNzWNYuH01NASNIb1skZfe_6l4_JSsG-vZ0LgN4Cgzf455BaP5zrxMQADHL5OQpbW6OAYJpZIJ2NIJpcISygI2rim11bHRpYWRkcnO4VgAoNiNub2RlLTAxLmRvLWFtczMud2FrdS50ZXN0LnN0YXR1cy5pbQZ2XwAqNiNub2RlLTAxLmRvLWFtczMud2FrdS50ZXN0LnN0YXR1cy5pbQYfQN4DgnJzkwABCAAAAAEAAgADAAQABQAGAAeJc2VjcDI1NmsxoQJATXRSRSUyTw_QLB6H_U3oziVQgNRgrXpK7wp2AMyNxYN0Y3CCdl-DdWRwgiMohXdha3UyDw",
-		"enr:-QEeuEBO08GSjWDOV13HTf6L7iFoPQhv4S0-_Bd7Of3lFCBNBmpB9j6pGLedkX88KAXm6BFCS4ViQ_rLeDQuzj9Q6fs9AYJpZIJ2NIJpcIQiEAFDim11bHRpYWRkcnO4aAAxNixub2RlLTAxLmdjLXVzLWNlbnRyYWwxLWEud2FrdS50ZXN0LnN0YXR1cy5pbQZ2XwAzNixub2RlLTAxLmdjLXVzLWNlbnRyYWwxLWEud2FrdS50ZXN0LnN0YXR1cy5pbQYfQN4DgnJzkwABCAAAAAEAAgADAAQABQAGAAeJc2VjcDI1NmsxoQMIJwesBVgUiBCi8yiXGx7RWylBQkYm1U9dvEy-neLG2YN0Y3CCdl-DdWRwgiMohXdha3UyDw",
-		"enr:-QEeuECvvBe6kIzHgMv_mD1YWQ3yfOfid2MO9a_A6ZZmS7E0FmAfntz2ZixAnPXvLWDJ81ARp4oV9UM4WXyc5D5USdEPAYJpZIJ2NIJpcIQI2ttrim11bHRpYWRkcnO4aAAxNixub2RlLTAxLmFjLWNuLWhvbmdrb25nLWMud2FrdS50ZXN0LnN0YXR1cy5pbQZ2XwAzNixub2RlLTAxLmFjLWNuLWhvbmdrb25nLWMud2FrdS50ZXN0LnN0YXR1cy5pbQYfQN4DgnJzkwABCAAAAAEAAgADAAQABQAGAAeJc2VjcDI1NmsxoQJIN4qwz3v4r2Q8Bv8zZD0eqBcKw6bdLvdkV7-JLjqIj4N0Y3CCdl-DdWRwgiMohXdha3UyDw",
+	nodeWakuConfig := common.WakuConfig{
+		Relay:           true,
+		LogLevel:        "DEBUG",
+		Discv5Discovery: true,
+		ClusterID:       42,
+		Shards:          []uint16{getShardFromContentTopic("qaku", "1", 1)},
+		Discv5UdpPort:   9000,
+		TcpPort:         60000,
+		Host:            "0.0.0.0",
+		Staticnodes:     []string{"/dns4/node-01.do-ams3.waku.sandbox.status.im/tcp/30303/p2p/16Uiu2HAmNaeL4p3WEYzC9mgXBmBWSgWjPHRvatZTXnp8Jgv3iKsb"},
 	}
 
-	enodes := []*enode.Node{}
-	for _, n := range nodes {
-		e, err := enode.Parse(enode.ValidSchemes, n)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		enodes = append(enodes, e)
-	}
-
-	node, err := node.New(
-		node.WithHostAddress(hostAddr),
-		node.WithWakuFilterLightNode(),
-		node.WithDiscoveryV5(uint(9000), enodes, true),
-		//node.WithLogLevel(zap.DebugLevel),
-		node.WithClusterID(uint16(1)),
-	)
+	node, err := waku.NewWakuNode(&nodeWakuConfig, "node")
 	if err != nil {
-		log.Fatal(err)
+		fmt.Printf("Failed to create Waku node: %v\n", err)
+		return
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	err = node.Start(ctx)
-	if err != nil {
-		log.Fatal(err)
+	if err := node.Start(); err != nil {
+		fmt.Printf("Failed to start Waku node: %v\n", err)
+		return
 	}
-
-	err = node.DiscV5().Start(ctx)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	time.Sleep(5 * time.Second)
-
-	contentTopic, err := protocol.StringToContentTopic(contentTopic)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Println(contentTopic)
-	pubsubTopic := protocol.GetShardFromContentTopic(contentTopic, 8)
-	cf := protocol.NewContentFilter(pubsubTopic.String(), "/0"+contentTopic.String())
+	defer node.Stop()
+	time.Sleep(1 * time.Second)
 
 	c := &Cache{}
 
-	logger, _ := zap.NewDevelopment()
-	fm := filter.NewFilterManager(ctx, logger, 2, c, node.FilterLightnode())
-	fm.SubscribeFilter(uuid.NewString(), cf)
-
-	log.Println("Starting main loop")
-	fm.OnConnectionStatusChange("", true)
+	go func() {
+		for envelope := range node.MsgChan {
+			if envelope.Message().ContentTopic == contentTopic {
+				c.OnNewEnvelope(envelope)
+			}
+		}
+	}()
 
 	server()
 }
@@ -245,7 +210,7 @@ func getCodexUrl() string {
 type Cache struct {
 }
 
-func (c *Cache) OnNewEnvelope(envelope *protocol.Envelope) error {
+func (c *Cache) OnNewEnvelope(envelope common.Envelope) error {
 	log.Println(envelope)
 	var err error
 	defer func() {
@@ -313,4 +278,17 @@ func (c *Cache) OnNewEnvelope(envelope *protocol.Envelope) error {
 	snapSuccess.Inc()
 
 	return nil
+}
+
+func getShardFromContentTopic(appName string, appVersion string, shardCount int) uint16 {
+	bytes := []byte(appName)
+	bytes = append(bytes, []byte(appVersion)...)
+
+	hash := sha256.Sum256(bytes)
+	//We only use the last 64 bits of the hash as having more shards is unlikely.
+	hashValue := binary.BigEndian.Uint64(hash[24:])
+
+	shard := hashValue % uint64(shardCount)
+
+	return uint16(shard)
 }
